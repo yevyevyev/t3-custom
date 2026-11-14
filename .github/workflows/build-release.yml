@@ -212,6 +212,8 @@ jobs:
           mkdir published
           gh release download "$tag" --dir published
           cmp "$archive" "published/$(basename "$archive")"
+          cmp out/SHA256SUMS published/SHA256SUMS
+          cmp out/build-manifest.json published/build-manifest.json
           (cd published && sha256sum -c SHA256SUMS)
           gh release edit "$tag" --draft=false
           immutable="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .immutable)"
@@ -219,5 +221,6 @@ jobs:
             echo "Release is not immutable; do not consume its assets." >&2
             exit 1
           fi
+          gh release verify "$tag" --repo "$GITHUB_REPOSITORY"
           echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
           echo "Artifact SHA256: $hash" >> "$GITHUB_STEP_SUMMARY"
