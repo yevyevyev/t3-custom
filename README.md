@@ -39,7 +39,15 @@ The workflow `.github/workflows/build-release.yml` runs on pushes and pull reque
 
 The release job uses the tested artifact from the same run, verifies its GitHub build attestation, rejects existing tags, and pins the release tag to the workflow commit. It creates a draft, uploads and checks the exact asset bytes, then publishes. Immutable release protections apply only after publication: the tag and assets cannot be changed or deleted while the release exists. Deleting an immutable release does not allow its tag name to be reused. The workflow refuses private-repository publication because anonymous consumers cannot fetch private assets.
 
-The dedicated attestation job downloads the build artifact from the same run and signs its archive digest using the GitHub Actions identity. This establishes the workflow run and source revision, not a claim that external upstream patch content was independently reviewed or that the build is reproducible. The manifest and `build-manifest.json` supplement the attestation with the intended upstream and patch pins. Verify the archive independently:
+The dedicated attestation job downloads the build artifact from the same run and signs its archive digest using the GitHub Actions identity. This establishes the workflow run and source revision, not a claim that external upstream patch content was independently reviewed or that the build is reproducible. The manifest and `build-manifest.json` supplement the attestation with the intended upstream and patch pins.
+
+GitHub may make an immutable release's attestation available shortly after
+publication. The release job waits at most two minutes only for the CLI's exact
+"no attestations" response for the expected tag and source commit. Signature,
+permission, network, unexpected response, and command timeout errors fail
+immediately; a timed-out wait also fails the job.
+
+Verify the archive independently:
 
 ```bash
 gh attestation verify t3-0.1.9-linux-x64.tar.gz --repo OWNER/REPOSITORY \
