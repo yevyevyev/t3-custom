@@ -58,6 +58,12 @@ for item in "${pins[@]:1}"; do
   git -C "$dest" -c user.name='t3-custom-ci' -c user.email='build@localhost' \
     commit -m "patch(t3): apply PR #$number ($pin)"
 done
+# An optional fail-closed policy for externally managed device tools.  Keep
+# this patch in the audited build recipe, not in a downstream environment.
+managed_patch="$(cd "$(dirname "$0")/.." && pwd)/patches/managed-device-tools.patch"
+git -C "$dest" apply --index "$managed_patch"
+git -C "$dest" -c user.name='t3-custom-ci' -c user.email='build@localhost' \
+  commit -m 'patch(t3): support externally managed device tools'
 git -C "$dest" diff --check
 version="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["version"])' "$manifest")"
 actual="$(git -C "$dest" show HEAD:apps/server/package.json | python3 -c 'import json,sys;print(json.load(sys.stdin)["version"])')"

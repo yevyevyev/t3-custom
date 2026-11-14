@@ -31,6 +31,7 @@ def create(path, source, output):
         'version': v['version'],
         'upstreamSha': v['upstreamSha'],
         'patchManifestSha256': digest(path),
+        'managedToolsPatchSha256': digest(Path(path).parent / 'patches/managed-device-tools.patch'),
         'patchedSha': patched_sha,
         'archiveSha256': digest(file),
     }
@@ -45,6 +46,7 @@ def verify(path, output):
         'version': v['version'],
         'upstreamSha': v['upstreamSha'],
         'patchManifestSha256': digest(path),
+        'managedToolsPatchSha256': digest(Path(path).parent / 'patches/managed-device-tools.patch'),
         'archiveSha256': digest(file),
     }
     for k, expected_value in expected.items():

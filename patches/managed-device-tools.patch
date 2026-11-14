@@ -1,0 +1,177 @@
+diff --git a/apps/server/src/device/DeviceToolchain.test.ts b/apps/server/src/device/DeviceToolchain.test.ts
+index 78dc719..f26be61 100644
+--- a/apps/server/src/device/DeviceToolchain.test.ts
++++ b/apps/server/src/device/DeviceToolchain.test.ts
+@@ -97,3 +97,36 @@ it.effect("unreadable inventory stays unknown instead of reporting no installs",
+     Effect.provide(NodeServices.layer),
+   ),
+ );
++
++it.effect("managed mode rejects a missing or incomplete tool without removing files or invoking npm", () =>
++  Effect.gen(function* () {
++    const original = process.env.T3CODE_DEVICE_TOOLS_MANAGED;
++    process.env.T3CODE_DEVICE_TOOLS_MANAGED = "1";
++    yield* Effect.gen(function* () {
++      const fs = yield* FileSystem.FileSystem;
++      const path = yield* Path.Path;
++      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-managed-" });
++      const install = path.join(baseDir, "tools", "expo-device-hub", DEVICE_HUB_VERSION);
++      yield* fs.makeDirectory(install, { recursive: true });
++      yield* fs.writeFileString(path.join(install, "keep"), "untouched");
++      let invoked = false;
++      const runner = { run: () => { invoked = true; return Effect.die("unexpected install"); } };
++      const error = yield* ensureDeviceHub(baseDir).pipe(
++        Effect.provideService(ProcessRunner.ProcessRunner, runner), Effect.flip,
++      );
++      expect(error.message).toContain("automatic installation is disabled");
++      expect(invoked).toBe(false);
++      expect(yield* fs.readFileString(path.join(install, "keep"))).toBe("untouched");
++      const entry = path.join(install, "node_modules/expo-device-hub/dist/server/cli.mjs");
++      yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
++      yield* fs.writeFileString(entry, "");
++      yield* fs.writeFileString(path.join(install, ".install-complete"), DEVICE_HUB_VERSION);
++      const ready = yield* ensureDeviceHub(baseDir).pipe(Effect.provideService(ProcessRunner.ProcessRunner, runner));
++      expect(ready.entryPath).toBe(entry);
++      expect(invoked).toBe(false);
++    }).pipe(Effect.ensuring(Effect.sync(() => {
++      if (original === undefined) delete process.env.T3CODE_DEVICE_TOOLS_MANAGED;
++      else process.env.T3CODE_DEVICE_TOOLS_MANAGED = original;
++    })));
++  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
++);
+diff --git a/apps/server/src/device/DeviceToolchain.ts b/apps/server/src/device/DeviceToolchain.ts
+index 7b041a5..4235bed 100644
+--- a/apps/server/src/device/DeviceToolchain.ts
++++ b/apps/server/src/device/DeviceToolchain.ts
+@@ -112,6 +112,12 @@ const installTool = Effect.fn("DeviceToolchain.installTool")(function* (
+     new DeviceToolchainInstallError({ tool: spec.name, step, cause });
+ 
+   if (yield* isInstalled(fs, paths, spec.version)) return paths;
++  if (process.env.T3CODE_DEVICE_TOOLS_MANAGED === "1") {
++    return yield* new DeviceToolchainInstallError({
++      tool: spec.name,
++      step: `finding the managed version ${spec.version}; automatic installation is disabled`,
++    });
++  }
+ 
+   const parentDir = path.dirname(paths.installDir);
+   yield* fs
+diff --git a/apps/server/src/device/deviceToolMaintenance.test.ts b/apps/server/src/device/deviceToolMaintenance.test.ts
+index dec86be..a99c031 100644
+--- a/apps/server/src/device/deviceToolMaintenance.test.ts
++++ b/apps/server/src/device/deviceToolMaintenance.test.ts
+@@ -158,3 +158,22 @@ it("serializes competing maintenance processes after reclaiming a stale lock", a
+     await NodeFSP.rm(root, { recursive: true, force: true });
+   }
+ });
++
++it.effect("managed local tools never start the pruning process", () =>
++  Effect.gen(function* () {
++    const original = process.env.T3CODE_DEVICE_TOOLS_MANAGED;
++    process.env.T3CODE_DEVICE_TOOLS_MANAGED = "1";
++    let invoked = false;
++    yield* pruneLocalDeviceTools("/managed", process.execPath, "hub").pipe(
++      Effect.provideService(ProcessRunner.ProcessRunner, {
++        run: () => { invoked = true; return Effect.die("unexpected prune"); },
++      }),
++      Effect.provide(NodePathLayer.layer),
++      Effect.ensuring(Effect.sync(() => {
++        if (original === undefined) delete process.env.T3CODE_DEVICE_TOOLS_MANAGED;
++        else process.env.T3CODE_DEVICE_TOOLS_MANAGED = original;
++      })),
++    );
++    expect(invoked).toBe(false);
++  }),
++);
+diff --git a/apps/server/src/device/deviceToolMaintenance.ts b/apps/server/src/device/deviceToolMaintenance.ts
+index 6d9e119..564a644 100644
+--- a/apps/server/src/device/deviceToolMaintenance.ts
++++ b/apps/server/src/device/deviceToolMaintenance.ts
+@@ -140,6 +140,7 @@ export const pruneLocalDeviceTools = Effect.fn("DeviceToolchain.prune")(function
+   nodePath: string,
+   tool: "hub" | "agent",
+ ) {
++  if (process.env.T3CODE_DEVICE_TOOLS_MANAGED === "1") return;
+   const path = yield* Path.Path;
+   yield* runMaintenance(
+     nodePath,
+diff --git a/apps/server/src/device/sshDeviceScript.test.ts b/apps/server/src/device/sshDeviceScript.test.ts
+index f048b88..6b7f45f 100644
+--- a/apps/server/src/device/sshDeviceScript.test.ts
++++ b/apps/server/src/device/sshDeviceScript.test.ts
+@@ -147,3 +147,32 @@ it.effect("keeps a daemon record its missing agent CLI cannot stop", () =>
+     });
+   }),
+ );
++
++it.effect("managed SSH tools fail closed without invoking npm or deleting incomplete files", () =>
++  Effect.gen(function* () {
++    if ((yield* HostProcess.Platform) === "win32") return;
++    yield* Effect.promise(async () => {
++      const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-managed-ssh-"));
++      try {
++        const bin = NodePath.join(home, "bin");
++        const tools = NodePath.join(home, ".t3/device/tools");
++        const incomplete = NodePath.join(tools, "expo-device-hub@0.22.1");
++        await NodeFSP.mkdir(bin, { recursive: true });
++        await NodeFSP.mkdir(incomplete, { recursive: true });
++        await NodeFSP.writeFile(NodePath.join(incomplete, "keep"), "untouched");
++        await NodeFSP.writeFile(NodePath.join(bin, "adb"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
++        await NodeFSP.writeFile(NodePath.join(bin, "npm"), `#!/bin/sh\ntouch ${home}/npm-ran\nexit 1\n`, { mode: 0o755 });
++        const result = NodeChildProcess.spawnSync(process.execPath, [], {
++          input: remoteDeviceScript("owner", "start", true),
++          env: { HOME: home, PATH: bin }, encoding: "utf8",
++        });
++        expect(result.status).not.toBe(0);
++        expect(result.stderr).toContain("automatic installation is disabled");
++        expect(await NodeFSP.readFile(NodePath.join(incomplete, "keep"), "utf8")).toBe("untouched");
++        await expect(NodeFSP.access(NodePath.join(home, "npm-ran"))).rejects.toThrow();
++      } finally {
++        await NodeFSP.rm(home, { recursive: true, force: true });
++      }
++    });
++  }),
++);
+diff --git a/apps/server/src/device/sshDeviceScript.ts b/apps/server/src/device/sshDeviceScript.ts
+index beb998e..edfd5e3 100644
+--- a/apps/server/src/device/sshDeviceScript.ts
++++ b/apps/server/src/device/sshDeviceScript.ts
+@@ -21,10 +21,12 @@ if [ -n "$JAVA_HOME" ]; then export PATH="$JAVA_HOME/bin:$PATH"; fi
+ export const remoteDeviceScript = (
+   owner: string,
+   mode: "probe" | "start" | "agent-start" | "stop-agent" | "stop",
++  managedTools = process.env.T3CODE_DEVICE_TOOLS_MANAGED === "1",
+ ) =>
+   `
+ const owner = ${JSON.stringify(owner)};
+ const mode = ${JSON.stringify(mode)};
++const managedTools = ${JSON.stringify(managedTools)};
+ const hubVersion = ${JSON.stringify(DEVICE_HUB_VERSION)};
+ const agentVersion = ${JSON.stringify(AGENT_DEVICE_VERSION)};
+ ` +
+@@ -111,6 +113,7 @@ async function install(name, version, entry) {
+   const file = path.join(dir, 'node_modules', name, entry);
+   const complete = () => fs.existsSync(file) && fs.existsSync(path.join(dir, '.install-complete')) && fs.readFileSync(path.join(dir, '.install-complete'), 'utf8').trim() === version;
+   if (complete()) return file;
++  if (managedTools) throw Error('Missing managed device tool ' + name + '@' + version + '; automatic installation is disabled.');
+   fs.mkdirSync(path.dirname(dir), { recursive: true });
+   const lock = dir + '.lock';
+   const release = await acquireLock(lock, complete);
+@@ -141,7 +144,7 @@ async function install(name, version, entry) {
+   if (mode === 'probe') {
+     const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+     if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) throw Error('Node 22.12 or newer is required on the device host.');
+-    if (run('npm', ['--version']).status !== 0) throw Error('npm is missing from the non-interactive SSH PATH.');
++    if (!managedTools && run('npm', ['--version']).status !== 0) throw Error('npm is missing from the non-interactive SSH PATH.');
+     console.log(JSON.stringify({ nodePath: process.execPath, platforms, tools: versions() })); return;
+   }
+   fs.mkdirSync(state, { recursive: true, mode: 0o700 });
+@@ -239,7 +242,7 @@ async function install(name, version, entry) {
+   }
+   const vendor = path.resolve(path.dirname(hubEntry), '../../vendor/serve-sim/dist');
+   const optional = file => fs.existsSync(file) ? file : null;
+-  await pruneTools(path.join(root, 'tools'), [['expo-device-hub', hubVersion], ...(mode === 'agent-start' ? [['agent-device', agentVersion]] : [])], true).catch(() => {});
++  if (!managedTools) await pruneTools(path.join(root, 'tools'), [['expo-device-hub', hubVersion], ...(mode === 'agent-start' ? [['agent-device', agentVersion]] : [])], true).catch(() => {});
+   console.log(JSON.stringify({ nodePath: process.execPath, platforms, tools: versions(), hubPort: hub.port, ...agentResult,
+     helpers: { serveSimAxSettings: optional(path.join(vendor, 'simax/serve-sim-ax-settings')), serveSimCli: optional(path.join(vendor, 'serve-sim.js')) } }));
+   } finally { releaseHost(); }
