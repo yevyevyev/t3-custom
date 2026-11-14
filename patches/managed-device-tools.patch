@@ -1,8 +1,8 @@
 diff --git a/apps/server/src/device/DeviceToolchain.test.ts b/apps/server/src/device/DeviceToolchain.test.ts
-index 78dc719..f26be61 100644
+index 78dc719..f73b0f5 100644
 --- a/apps/server/src/device/DeviceToolchain.test.ts
 +++ b/apps/server/src/device/DeviceToolchain.test.ts
-@@ -97,3 +97,36 @@ it.effect("unreadable inventory stays unknown instead of reporting no installs",
+@@ -97,3 +97,40 @@ it.effect("unreadable inventory stays unknown instead of reporting no installs",
      Effect.provide(NodeServices.layer),
    ),
  );
@@ -30,6 +30,10 @@ index 78dc719..f26be61 100644
 +      yield* fs.makeDirectory(path.dirname(entry), { recursive: true });
 +      yield* fs.writeFileString(entry, "");
 +      yield* fs.writeFileString(path.join(install, ".install-complete"), DEVICE_HUB_VERSION);
++      yield* fs.writeFileString(path.join(install, "node_modules/expo-device-hub/package.json"), JSON.stringify({ version: "0.0.0" }));
++      const wrongVersion = yield* ensureDeviceHub(baseDir).pipe(Effect.provideService(ProcessRunner.ProcessRunner, runner), Effect.flip);
++      expect(wrongVersion.message).toContain("automatic installation is disabled");
++      yield* fs.writeFileString(path.join(install, "node_modules/expo-device-hub/package.json"), JSON.stringify({ version: DEVICE_HUB_VERSION }));
 +      const ready = yield* ensureDeviceHub(baseDir).pipe(Effect.provideService(ProcessRunner.ProcessRunner, runner));
 +      expect(ready.entryPath).toBe(entry);
 +      expect(invoked).toBe(false);
@@ -40,22 +44,31 @@ index 78dc719..f26be61 100644
 +  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 +);
 diff --git a/apps/server/src/device/DeviceToolchain.ts b/apps/server/src/device/DeviceToolchain.ts
-index 7b041a5..4235bed 100644
+index 7b041a5..3fc5e1d 100644
 --- a/apps/server/src/device/DeviceToolchain.ts
 +++ b/apps/server/src/device/DeviceToolchain.ts
-@@ -112,6 +112,12 @@ const installTool = Effect.fn("DeviceToolchain.installTool")(function* (
+@@ -111,8 +111,20 @@ const installTool = Effect.fn("DeviceToolchain.installTool")(function* (
+   const fail = (step: string) => (cause: unknown) =>
      new DeviceToolchainInstallError({ tool: spec.name, step, cause });
  
-   if (yield* isInstalled(fs, paths, spec.version)) return paths;
+-  if (yield* isInstalled(fs, paths, spec.version)) return paths;
++  const installed = yield* isInstalled(fs, paths, spec.version);
 +  if (process.env.T3CODE_DEVICE_TOOLS_MANAGED === "1") {
++    const packageJson = yield* fs.readFileString(path.join(paths.installDir, "node_modules", spec.name, "package.json"))
++      .pipe(Effect.orElseSucceed(() => ""));
++    let versionMatches = false;
++    try { versionMatches = JSON.parse(packageJson).version === spec.version; } catch { /* invalid package metadata */ }
++    if (installed && versionMatches) return paths;
 +    return yield* new DeviceToolchainInstallError({
 +      tool: spec.name,
 +      step: `finding the managed version ${spec.version}; automatic installation is disabled`,
 +    });
 +  }
  
++  if (installed) return paths;
    const parentDir = path.dirname(paths.installDir);
    yield* fs
+     .remove(paths.installDir, { recursive: true, force: true })
 diff --git a/apps/server/src/device/deviceToolMaintenance.test.ts b/apps/server/src/device/deviceToolMaintenance.test.ts
 index dec86be..a99c031 100644
 --- a/apps/server/src/device/deviceToolMaintenance.test.ts
@@ -133,7 +146,7 @@ index f048b88..6b7f45f 100644
 +  }),
 +);
 diff --git a/apps/server/src/device/sshDeviceScript.ts b/apps/server/src/device/sshDeviceScript.ts
-index beb998e..edfd5e3 100644
+index beb998e..983dfab 100644
 --- a/apps/server/src/device/sshDeviceScript.ts
 +++ b/apps/server/src/device/sshDeviceScript.ts
 @@ -21,10 +21,12 @@ if [ -n "$JAVA_HOME" ]; then export PATH="$JAVA_HOME/bin:$PATH"; fi
@@ -149,15 +162,24 @@ index beb998e..edfd5e3 100644
  const hubVersion = ${JSON.stringify(DEVICE_HUB_VERSION)};
  const agentVersion = ${JSON.stringify(AGENT_DEVICE_VERSION)};
  ` +
-@@ -111,6 +113,7 @@ async function install(name, version, entry) {
+@@ -109,8 +111,15 @@ async function acquireLock(lock, complete = () => false) {
+ async function install(name, version, entry) {
+   const dir = path.join(root, 'tools', name + '@' + version);
    const file = path.join(dir, 'node_modules', name, entry);
-   const complete = () => fs.existsSync(file) && fs.existsSync(path.join(dir, '.install-complete')) && fs.readFileSync(path.join(dir, '.install-complete'), 'utf8').trim() === version;
+-  const complete = () => fs.existsSync(file) && fs.existsSync(path.join(dir, '.install-complete')) && fs.readFileSync(path.join(dir, '.install-complete'), 'utf8').trim() === version;
++  const complete = () => {
++    if (!managedTools) return fs.existsSync(file) && fs.existsSync(path.join(dir, '.install-complete')) && fs.readFileSync(path.join(dir, '.install-complete'), 'utf8').trim() === version;
++    try {
++      return fs.existsSync(file) && fs.readFileSync(path.join(dir, '.install-complete'), 'utf8').trim() === version &&
++        JSON.parse(fs.readFileSync(path.join(dir, 'node_modules', name, 'package.json'), 'utf8')).version === version;
++    } catch { return false; }
++  };
    if (complete()) return file;
 +  if (managedTools) throw Error('Missing managed device tool ' + name + '@' + version + '; automatic installation is disabled.');
    fs.mkdirSync(path.dirname(dir), { recursive: true });
    const lock = dir + '.lock';
    const release = await acquireLock(lock, complete);
-@@ -141,7 +144,7 @@ async function install(name, version, entry) {
+@@ -141,7 +150,7 @@ async function install(name, version, entry) {
    if (mode === 'probe') {
      const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
      if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) throw Error('Node 22.12 or newer is required on the device host.');
@@ -166,7 +188,7 @@ index beb998e..edfd5e3 100644
      console.log(JSON.stringify({ nodePath: process.execPath, platforms, tools: versions() })); return;
    }
    fs.mkdirSync(state, { recursive: true, mode: 0o700 });
-@@ -239,7 +242,7 @@ async function install(name, version, entry) {
+@@ -239,7 +248,7 @@ async function install(name, version, entry) {
    }
    const vendor = path.resolve(path.dirname(hubEntry), '../../vendor/serve-sim/dist');
    const optional = file => fs.existsSync(file) ? file : null;

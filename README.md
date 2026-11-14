@@ -19,7 +19,7 @@ the source contents independent of the temporary patch commits' timestamps.
 An additional local patch adds an opt-in managed-tools policy. Set
 `T3CODE_DEVICE_TOOLS_MANAGED=1` in the T3 server environment to require the
 exact upstream-selected device tool versions to be provisioned in the normal
-T3 paths, with valid completion sentinels. The policy is carried to SSH hosts;
+T3 paths, with matching package metadata and completion sentinels. The policy is carried to SSH hosts;
 missing or incomplete tools fail closed instead of invoking a package manager,
 and automatic tool-cache pruning is disabled. With the variable unset, upstream
 install and cleanup behavior remains unchanged. Provisioning remote tools is
