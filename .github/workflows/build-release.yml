@@ -224,6 +224,7 @@ jobs:
             echo "Release is not immutable; do not consume its assets." >&2
             exit 1
           fi
-          gh release verify "$tag" --repo "$GITHUB_REPOSITORY"
+          python3 scripts/verify-release-attestation.py \
+            --repo "$GITHUB_REPOSITORY" --tag "$tag" --source-sha "$GITHUB_SHA"
           echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
           echo "Artifact SHA256: $hash" >> "$GITHUB_STEP_SUMMARY"
