@@ -1,0 +1,156 @@
+# Standalone T3 build pipeline. No downstream deployment credentials or write access.
+name: Build custom T3 Linux CLI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested archive as a public GitHub Release
+        type: boolean
+        required: true
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout t3-custom
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Verify pinned build configuration
+        run: |
+          python3 -m unittest discover -s tests -v
+          bash -n scripts/assemble.sh
+          python3 scripts/validate-manifest.py manifest.json
+
+      - name: Apply pinned upstream T3 PRs
+        run: bash scripts/assemble.sh manifest.json "$GITHUB_WORKSPACE/t3-src"
+
+      - name: Setup pinned upstream Vite+ and Node
+        uses: voidzero-dev/setup-vp@250f29ce396baf5e8f24498e17c0dfdebabc26eb # v1.15.0
+        with:
+          node-version-file: t3-src/package.json
+          cache: false
+          run-install: false
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf libatomic1 build-essential python3 pkg-config
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: stable
+
+      - name: Install pinned T3 workspace packages
+        working-directory: t3-src
+        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+
+      - name: Run device ownership regression tests
+        working-directory: t3-src
+        # T3's own CI runs via the server workspace; invoking vp test at the
+        # monorepo root also initializes unrelated mobile test configuration.
+        run: |
+          vp run --filter t3 test \
+            src/device/AgentDeviceTarget.test.ts \
+            src/device/DeviceService.test.ts \
+            src/orchestration-v2/ThreadSettlementService.test.ts
+
+      - name: Build server and bundled web client
+        working-directory: t3-src
+        env:
+          T3CODE_TELEMETRY_CHANNEL: dev
+        run: vp run build:desktop:bundle
+
+      - name: Build self-contained CLI and resource monitor
+        working-directory: t3-src
+        run: |
+          node apps/server/scripts/cli.ts build-exe --verbose
+          cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml
+          mkdir -p "$RUNNER_TEMP/cli-monitor/linux-x64"
+          cp native/resource-monitor/target/release/t3-resource-monitor "$RUNNER_TEMP/cli-monitor/linux-x64/"
+
+      - name: Package and smoke-test CLI
+        working-directory: t3-src
+        run: |
+          version="$(python3 -c 'import json;print(json.load(open("../manifest.json"))["version"])')"
+          node scripts/build-cli-archive.ts --platform linux --arch x64 \
+            --version "$version" --resource-monitor-dir "$RUNNER_TEMP/cli-monitor" \
+            --output-dir release-cli
+          node scripts/smoke-cli-archive.ts --archive release-cli/* --expect-version "$version"
+
+      - name: Stamp checksums and provenance
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          cp t3-src/release-cli/*.tar.gz out/
+          (cd out && sha256sum *.tar.gz > SHA256SUMS)
+          python3 scripts/provenance.py manifest.json t3-src out
+          cat out/SHA256SUMS
+
+      - name: Upload verified build artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: custom-t3-linux-x64
+          path: out/
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    needs: [build]
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout release manifest
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+
+      - name: Refuse anonymous-release publication from private repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$(gh repo view "$GITHUB_REPOSITORY" --json isPrivate --jq .isPrivate)" != false ]]; then
+            echo "Repository is private: Nix cannot anonymously fetch private release assets. Make this repository public or use a separate public artifact host." >&2
+            exit 1
+          fi
+
+      - name: Download exact tested artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: custom-t3-linux-x64
+          path: out
+
+      - name: Verify artifact bytes and provenance
+        run: |
+          (cd out && sha256sum -c SHA256SUMS)
+          python3 scripts/provenance.py --verify manifest.json out
+
+      - name: Publish immutable content-derived release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json;print(json.load(open("manifest.json"))["version"])')"
+          archive="out/t3-$version-linux-x64.tar.gz"
+          hash="$(sha256sum "$archive" | cut -d' ' -f1)"
+          tag="custom-t3-v$version-${hash:0:12}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to overwrite" >&2
+            exit 1
+          fi
+          gh release create "$tag" out/*.tar.gz out/SHA256SUMS out/build-manifest.json \
+            --title "T3 $version + pinned device fixes ($tag)" \
+            --notes "Independent build from pinned upstream and reviewed PR revisions. SHA256SUMS and provenance included." \
+            --latest=false
+          echo "Release: https://github.com/$GITHUB_REPOSITORY/releases/tag/$tag" >> "$GITHUB_STEP_SUMMARY"
+          echo "Artifact SHA256: $hash" >> "$GITHUB_STEP_SUMMARY"
