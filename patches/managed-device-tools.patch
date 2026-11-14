@@ -109,10 +109,18 @@ index 6d9e119..564a644 100644
    yield* runMaintenance(
      nodePath,
 diff --git a/apps/server/src/device/sshDeviceScript.test.ts b/apps/server/src/device/sshDeviceScript.test.ts
-index f048b88..6b7f45f 100644
+index f048b88..ee5068e 100644
 --- a/apps/server/src/device/sshDeviceScript.test.ts
 +++ b/apps/server/src/device/sshDeviceScript.test.ts
-@@ -147,3 +147,32 @@ it.effect("keeps a daemon record its missing agent CLI cannot stop", () =>
+@@ -8,6 +8,7 @@ import * as NodeOS from "node:os";
+ import * as NodePath from "node:path";
+ import * as NodeUtil from "node:util";
+ import { quoteRemoteArg, remoteDeviceEnvironment, remoteDeviceScript } from "./sshDeviceScript.ts";
++import { DEVICE_HUB_VERSION } from "./DeviceToolchain.ts";
+ 
+ const exec = NodeUtil.promisify(NodeChildProcess.execFile);
+ 
+@@ -147,3 +148,44 @@ it.effect("keeps a daemon record its missing agent CLI cannot stop", () =>
      });
    }),
  );
@@ -125,7 +133,7 @@ index f048b88..6b7f45f 100644
 +      try {
 +        const bin = NodePath.join(home, "bin");
 +        const tools = NodePath.join(home, ".t3/device/tools");
-+        const incomplete = NodePath.join(tools, "expo-device-hub@0.22.1");
++        const incomplete = NodePath.join(tools, `expo-device-hub@${DEVICE_HUB_VERSION}`);
 +        await NodeFSP.mkdir(bin, { recursive: true });
 +        await NodeFSP.mkdir(incomplete, { recursive: true });
 +        await NodeFSP.writeFile(NodePath.join(incomplete, "keep"), "untouched");
@@ -137,6 +145,18 @@ index f048b88..6b7f45f 100644
 +        });
 +        expect(result.status).not.toBe(0);
 +        expect(result.stderr).toContain("automatic installation is disabled");
++        expect(await NodeFSP.readFile(NodePath.join(incomplete, "keep"), "utf8")).toBe("untouched");
++        await expect(NodeFSP.access(NodePath.join(home, "npm-ran"))).rejects.toThrow();
++        const pkg = NodePath.join(incomplete, "node_modules/expo-device-hub");
++        await NodeFSP.mkdir(NodePath.join(pkg, "dist/server"), { recursive: true });
++        await NodeFSP.writeFile(NodePath.join(pkg, "dist/server/cli.mjs"), "");
++        await NodeFSP.writeFile(NodePath.join(incomplete, ".install-complete"), DEVICE_HUB_VERSION);
++        await NodeFSP.writeFile(NodePath.join(pkg, "package.json"), JSON.stringify({ version: "0.0.0" }));
++        const mismatch = NodeChildProcess.spawnSync(process.execPath, [], {
++          input: remoteDeviceScript("owner", "start", true),
++          env: { HOME: home, PATH: bin }, encoding: "utf8",
++        });
++        expect(mismatch.stderr).toContain("automatic installation is disabled");
 +        expect(await NodeFSP.readFile(NodePath.join(incomplete, "keep"), "utf8")).toBe("untouched");
 +        await expect(NodeFSP.access(NodePath.join(home, "npm-ran"))).rejects.toThrow();
 +      } finally {
