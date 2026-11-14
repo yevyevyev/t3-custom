@@ -27,12 +27,14 @@ def create(path, source, output):
     v = manifest(path)
     file = artifact_path(output, v['version'])
     patched_sha = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD'], text=True).strip()
+    patched_tree_sha = subprocess.check_output(['git', '-C', source, 'rev-parse', 'HEAD^{tree}'], text=True).strip()
     data = {
         'version': v['version'],
         'upstreamSha': v['upstreamSha'],
         'patchManifestSha256': digest(path),
         'managedToolsPatchSha256': digest(Path(path).parent / 'patches/managed-device-tools.patch'),
         'patchedSha': patched_sha,
+        'patchedTreeSha': patched_tree_sha,
         'archiveSha256': digest(file),
     }
     (Path(output) / 'build-manifest.json').write_text(json.dumps(data, indent=2) + '\n')
@@ -54,6 +56,8 @@ def verify(path, output):
             raise ValueError(f'Artifact provenance mismatch for {k}')
     if not re.fullmatch(r'[0-9a-f]{40}', built.get('patchedSha', '')):
         raise ValueError('Invalid patched source commit')
+    if not re.fullmatch(r'[0-9a-f]{40}', built.get('patchedTreeSha', '')):
+        raise ValueError('Invalid patched source tree')
     print('Artifact provenance verified')
 
 
