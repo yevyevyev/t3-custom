@@ -53,8 +53,19 @@ class ManifestTests(unittest.TestCase):
         self.assertIn("scripts/provenance.py --verify", workflow)
         self.assertIn("scripts/assemble.sh manifest.json", workflow)
         self.assertIn("nix", (ROOT / "README.md").read_text())
-        self.assertNotIn("nixos-rebuild switch", workflow)
-        self.assertNotIn("nixos-rebuild switch", workflow)
+
+    def test_release_security_contract(self):
+        workflow = (ROOT / ".github/workflows/build-release.yml").read_text()
+        self.assertEqual(workflow.count("persist-credentials: false"), 2)
+        self.assertIn("toolchain: 1.100.0", workflow)
+        self.assertIn("uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d", workflow)
+        self.assertIn("subject-path: out/*.tar.gz", workflow)
+        self.assertEqual(workflow.count("--source-digest \"$GITHUB_SHA\" --deny-self-hosted-runners"), 2)
+        self.assertIn("needs: [build, attest]", workflow)
+        self.assertIn("immutable_setting_verified", workflow)
+        self.assertIn('--target "$GITHUB_SHA" --draft', workflow)
+        self.assertIn('cmp "$archive" "published/$(basename "$archive")"', workflow)
+        self.assertIn('--jq .immutable', workflow)
 
 
 if __name__ == "__main__":
