@@ -24,7 +24,18 @@ The workflow `.github/workflows/build-release.yml` runs on pushes and pull reque
 4. Run T3's archive smoke test, and record SHA-256 checksums and source/patch provenance.
 5. Upload an Actions artifact for inspection.
 
-**This workflow never deploys to downstream systems.** For a public release, manually dispatch the workflow from `main` with `publish: true`. The release job refuses to publish while this repository is private, because private Release assets cannot be fetched anonymously by NixOS. It creates a content-addressed GitHub Release tag and never overwrites a release.
+**This workflow never deploys to downstream systems.** Before dispatching a release, an administrator must check that repository release immutability is enabled. Dispatch the workflow from `main` with both `publish` and `immutable_setting_verified` set to true. The latter records the operator's check; the Actions token cannot independently query the setting because GitHub requires repository administration read access. The workflow checks the resulting release's `immutable` flag after publication and fails if it is false. This is a post-publication check, so a change to the setting between the operator's check and publication remains possible: never consume a release that fails this check.
+
+The release job uses the tested artifact from the same run, verifies its GitHub build attestation, rejects existing tags, and pins the release tag to the workflow commit. It creates a draft, uploads and checks the exact asset bytes, then publishes. Immutable release protections apply only after publication: the tag and assets cannot be changed or deleted while the release exists. Deleting an immutable release does not allow its tag name to be reused. The workflow refuses private-repository publication because anonymous consumers cannot fetch private assets.
+
+The dedicated attestation job downloads the build artifact from the same run and signs its archive digest using the GitHub Actions identity. This establishes the workflow run and source revision, not a claim that external upstream patch content was independently reviewed or that the build is reproducible. The manifest and `build-manifest.json` supplement the attestation with the intended upstream and patch pins. Verify the archive independently:
+
+```bash
+gh attestation verify t3-0.1.9-linux-x64.tar.gz --repo OWNER/REPOSITORY \
+  --signer-workflow OWNER/REPOSITORY/.github/workflows/build-release.yml \
+  --source-digest EXPECTED_FULL_SOURCE_COMMIT --deny-self-hosted-runners
+gh release verify RELEASE_TAG --repo OWNER/REPOSITORY
+```
 
 **Repository visibility:** this repository was initially created **private**. To publish archives usable by `nixpkgs.fetchurl` without credentials, change visibility to **Public** in GitHub **Settings → General → Danger Zone → Change repository visibility**, after reviewing the files. Alternatively, retain privacy and introduce a separate public artifact host. Never bake a token into the Nix store or an artifact URL.
 
