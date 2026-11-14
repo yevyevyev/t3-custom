@@ -13,6 +13,17 @@ The checked-in `manifest.json` pins T3 v0.1.9 upstream and these PR revisions:
 | [#32862](https://github.com/pingdotgg/t3code/pull/32862) | Show the device owner and allow explicit takeover in the web UI |
 
 The patches are applied from pinned **commit objects**, not floating PR branches. A conflict fails the build; rebase decisions need review.
+The generated metadata records the assembled Git tree ID, which identifies
+the source contents independent of the temporary patch commits' timestamps.
+
+An additional local patch adds an opt-in managed-tools policy. Set
+`T3CODE_DEVICE_TOOLS_MANAGED=1` in the T3 server environment to require the
+exact upstream-selected device tool versions to be provisioned in the normal
+T3 paths, with matching package metadata and completion sentinels. The policy is carried to SSH hosts;
+missing or incomplete tools fail closed instead of invoking a package manager,
+and automatic tool-cache pruning is disabled. With the variable unset, upstream
+install and cleanup behavior remains unchanged. Provisioning remote tools is
+the operator's responsibility; this policy does not synchronize packages.
 
 ## CI and releases
 
